@@ -7,6 +7,10 @@
 - https://github.com/uber-go/guide
 - https://google.github.io/styleguide/go/
 
+# Docker
+
+https://hub.docker.com/r/cutetarantula/http-basic-auth
+
 # Generate a random string
 
 ```
