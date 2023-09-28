@@ -1,0 +1,11 @@
+.gitignore
+.prettierrc.js
+.prettierignore
+.golangci.yml
+.envrc
+.envrc.local
+.github
+.git
+shell.nix
+README.md
+Makefile
