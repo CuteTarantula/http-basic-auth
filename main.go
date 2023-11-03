@@ -128,6 +128,7 @@ func main() {
 
 				r := mux.NewRouter()
 				r.Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					// TODO: add rate limiting per IP in case auth is unsuccessful
 					username, password, ok := r.BasicAuth()
 					if !ok {
 						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
@@ -135,19 +136,14 @@ func main() {
 						return
 					}
 
-					if username != user {
-						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-						http.Error(w, "Unauthorized", http.StatusUnauthorized)
-						return
-					}
-
 					unh := unhashed.Load()
-					if unh != "" && unh == password {
+					if unh != "" && unh == password && username == user {
 						proxy.ServeHTTP(w, r)
 						return
 					}
 
-					if err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password)); err != nil {
+					err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
+					if err != nil || username != user {
 						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
 						http.Error(w, "Unauthorized", http.StatusUnauthorized)
 						return
