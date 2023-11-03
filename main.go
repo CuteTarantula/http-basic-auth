@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -126,9 +127,9 @@ func main() {
 					},
 				}
 
+				limiter := newRateLimiter(ctx, 5, time.Minute)
 				r := mux.NewRouter()
 				r.Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					// TODO: add rate limiting per IP in case auth is unsuccessful
 					username, password, ok := r.BasicAuth()
 					if !ok {
 						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
@@ -142,7 +143,15 @@ func main() {
 						return
 					}
 
-					err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
+					ip := userIP(r)
+					err := limiter.Wait(r.Context(), ip)
+					if unh != "" && err != nil {
+						log.Error(errors.New("rate limit exceeded"), "rate limit exceeded", "ip", ip)
+						http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+						return
+					}
+
+					err = bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
 					if err == nil && username == user {
 						unhashed.Store(password)
 						proxy.ServeHTTP(w, r)
@@ -219,5 +228,77 @@ func runHTTP(ctx context.Context, log logr.Logger, addr, name string, handler ht
 	return s.Serve(l)
 }
 
+type rateLimiterTimestamp struct {
+	count     uint64
+	timestamp time.Time
+}
+
 type rateLimiter struct {
+	keys map[string]*rateLimiterTimestamp
+	max  uint64
+	cond *sync.Cond
+	dur  time.Duration
+}
+
+func newRateLimiter(ctx context.Context, max uint64, d time.Duration) *rateLimiter {
+	r := rateLimiter{
+		keys: make(map[string]*rateLimiterTimestamp),
+		max:  max,
+		cond: sync.NewCond(&sync.Mutex{}),
+		dur:  d,
+	}
+	go func() {
+		ticker := time.NewTicker(d / 2)
+		for ctx.Err() == nil {
+			<-ticker.C
+			r.clearOldKeys()
+		}
+	}()
+
+	return &r
+}
+
+func (i *rateLimiter) clearOldKeys() {
+	i.cond.L.Lock()
+	defer i.cond.L.Unlock()
+	for k, v := range i.keys {
+		if v.count == 0 && time.Since(v.timestamp) > i.dur {
+			delete(i.keys, k)
+		}
+	}
+}
+
+func (i *rateLimiter) Wait(ctx context.Context, key string) error {
+	i.cond.L.Lock()
+	defer i.cond.L.Unlock()
+	l, exists := i.keys[key]
+
+	if !exists {
+		i.keys[key] = &rateLimiterTimestamp{
+			count:     1,
+			timestamp: time.Now(),
+		}
+		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	for l.count >= i.max {
+		i.cond.Wait()
+	}
+
+	l.count++
+	return nil
+}
+
+func userIP(r *http.Request) string {
+	a := r.Header.Get("X-Forwarded-For")
+	if a == "" {
+		a = r.RemoteAddr
+	}
+	return strings.Split(a, ",")[0]
 }
