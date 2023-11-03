@@ -143,15 +143,14 @@ func main() {
 					}
 
 					err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
-					if err != nil || username != user {
-						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-						http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					if err == nil && username == user {
+						unhashed.Store(password)
+						proxy.ServeHTTP(w, r)
 						return
 					}
 
-					unhashed.Store(password)
-
-					proxy.ServeHTTP(w, r)
+					w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				})
 
 				return runHTTP(ctx, log, c.String("addr"), "server", r)
@@ -218,4 +217,7 @@ func runHTTP(ctx context.Context, log logr.Logger, addr, name string, handler ht
 
 	log.Info(fmt.Sprintf("%s server is up and running", name), "addr", l.Addr().String())
 	return s.Serve(l)
+}
+
+type rateLimiter struct {
 }
