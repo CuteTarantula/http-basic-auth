@@ -87,6 +87,16 @@ func main() {
 				EnvVars: []string{"AUTH_TIMEOUT"},
 				Value:   24 * time.Hour,
 			},
+			&cli.Uint64Flag{
+				Name:    "rate-limit-max",
+				EnvVars: []string{"RATE_LIMIT_MAX"},
+				Value:   5,
+			},
+			&cli.DurationFlag{
+				Name:    "rate-limit-duration",
+				EnvVars: []string{"RATE_LIMIT_DURATION"},
+				Value:   time.Minute,
+			},
 		},
 		Action: func(c *cli.Context) error {
 			eg, ctx := errgroup.WithContext(c.Context)
@@ -127,11 +137,18 @@ func main() {
 					},
 				}
 
-				limiter := newRateLimiter(ctx, 5, time.Minute)
+				limiter := newRateLimiter(ctx, c.Uint64("rate-limit-max"), c.Duration("rate-limit-duration"))
 				r := mux.NewRouter()
+
 				r.Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					ip := userIP(r)
 					username, password, ok := r.BasicAuth()
 					if !ok {
+						if err := limiter.Wait(r.Context(), ip); err != nil {
+							log.Error(errors.New("rate limit exceeded"), "no auth provided", "ip", ip)
+							http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+							return
+						}
 						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
 						http.Error(w, "Unauthorized", http.StatusUnauthorized)
 						return
@@ -143,15 +160,13 @@ func main() {
 						return
 					}
 
-					ip := userIP(r)
-					err := limiter.Wait(r.Context(), ip)
-					if unh != "" && err != nil {
-						log.Error(errors.New("rate limit exceeded"), "rate limit exceeded", "ip", ip)
+					if err := limiter.Wait(r.Context(), ip); err != nil {
+						log.Error(errors.New("rate limit exceeded"), "incorrect auth", "ip", ip)
 						http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 						return
 					}
 
-					err = bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
+					err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
 					if err == nil && username == user {
 						unhashed.Store(password)
 						proxy.ServeHTTP(w, r)
@@ -236,15 +251,15 @@ type rateLimiterTimestamp struct {
 type rateLimiter struct {
 	keys map[string]*rateLimiterTimestamp
 	max  uint64
-	cond *sync.Cond
 	dur  time.Duration
+	mux  *sync.Mutex
 }
 
 func newRateLimiter(ctx context.Context, max uint64, d time.Duration) *rateLimiter {
 	r := rateLimiter{
 		keys: make(map[string]*rateLimiterTimestamp),
 		max:  max,
-		cond: sync.NewCond(&sync.Mutex{}),
+		mux:  &sync.Mutex{},
 		dur:  d,
 	}
 	go func() {
@@ -259,18 +274,18 @@ func newRateLimiter(ctx context.Context, max uint64, d time.Duration) *rateLimit
 }
 
 func (i *rateLimiter) clearOldKeys() {
-	i.cond.L.Lock()
-	defer i.cond.L.Unlock()
+	i.mux.Lock()
+	defer i.mux.Unlock()
 	for k, v := range i.keys {
-		if v.count == 0 && time.Since(v.timestamp) > i.dur {
+		if time.Since(v.timestamp) > i.dur {
 			delete(i.keys, k)
 		}
 	}
 }
 
 func (i *rateLimiter) Wait(ctx context.Context, key string) error {
-	i.cond.L.Lock()
-	defer i.cond.L.Unlock()
+	i.mux.Lock()
+	defer i.mux.Unlock()
 	l, exists := i.keys[key]
 
 	if !exists {
@@ -288,7 +303,7 @@ func (i *rateLimiter) Wait(ctx context.Context, key string) error {
 	}
 
 	for l.count >= i.max {
-		i.cond.Wait()
+		return fmt.Errorf("rate limit exceeded for %s", key)
 	}
 
 	l.count++
