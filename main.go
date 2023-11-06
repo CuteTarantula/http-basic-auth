@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -86,6 +87,16 @@ func main() {
 				EnvVars: []string{"AUTH_TIMEOUT"},
 				Value:   24 * time.Hour,
 			},
+			&cli.Uint64Flag{
+				Name:    "rate-limit-max",
+				EnvVars: []string{"RATE_LIMIT_MAX"},
+				Value:   5,
+			},
+			&cli.DurationFlag{
+				Name:    "rate-limit-duration",
+				EnvVars: []string{"RATE_LIMIT_DURATION"},
+				Value:   time.Minute,
+			},
 		},
 		Action: func(c *cli.Context) error {
 			eg, ctx := errgroup.WithContext(c.Context)
@@ -126,36 +137,44 @@ func main() {
 					},
 				}
 
+				limiter := newRateLimiter(ctx, c.Uint64("rate-limit-max"), c.Duration("rate-limit-duration"))
 				r := mux.NewRouter()
+
 				r.Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					ip := userIP(r)
 					username, password, ok := r.BasicAuth()
 					if !ok {
-						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-						http.Error(w, "Unauthorized", http.StatusUnauthorized)
-						return
-					}
-
-					if username != user {
+						if err := limiter.Wait(r.Context(), ip); err != nil {
+							log.Error(errors.New("rate limit exceeded"), "no auth provided", "ip", ip)
+							http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+							return
+						}
 						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
 						http.Error(w, "Unauthorized", http.StatusUnauthorized)
 						return
 					}
 
 					unh := unhashed.Load()
-					if unh != "" && unh == password {
+					if unh != "" && unh == password && username == user {
 						proxy.ServeHTTP(w, r)
 						return
 					}
 
-					if err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password)); err != nil {
-						w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-						http.Error(w, "Unauthorized", http.StatusUnauthorized)
+					if err := limiter.Wait(r.Context(), ip); err != nil {
+						log.Error(errors.New("rate limit exceeded"), "incorrect auth", "ip", ip)
+						http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 						return
 					}
 
-					unhashed.Store(password)
+					err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
+					if err == nil && username == user {
+						unhashed.Store(password)
+						proxy.ServeHTTP(w, r)
+						return
+					}
 
-					proxy.ServeHTTP(w, r)
+					w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				})
 
 				return runHTTP(ctx, log, c.String("addr"), "server", r)
@@ -222,4 +241,79 @@ func runHTTP(ctx context.Context, log logr.Logger, addr, name string, handler ht
 
 	log.Info(fmt.Sprintf("%s server is up and running", name), "addr", l.Addr().String())
 	return s.Serve(l)
+}
+
+type rateLimiterTimestamp struct {
+	count     uint64
+	timestamp time.Time
+}
+
+type rateLimiter struct {
+	keys map[string]*rateLimiterTimestamp
+	max  uint64
+	dur  time.Duration
+	mux  *sync.Mutex
+}
+
+func newRateLimiter(ctx context.Context, max uint64, d time.Duration) *rateLimiter {
+	r := rateLimiter{
+		keys: make(map[string]*rateLimiterTimestamp),
+		max:  max,
+		mux:  &sync.Mutex{},
+		dur:  d,
+	}
+	go func() {
+		ticker := time.NewTicker(d / 2)
+		for ctx.Err() == nil {
+			<-ticker.C
+			r.clearOldKeys()
+		}
+	}()
+
+	return &r
+}
+
+func (i *rateLimiter) clearOldKeys() {
+	i.mux.Lock()
+	defer i.mux.Unlock()
+	for k, v := range i.keys {
+		if time.Since(v.timestamp) > i.dur {
+			delete(i.keys, k)
+		}
+	}
+}
+
+func (i *rateLimiter) Wait(ctx context.Context, key string) error {
+	i.mux.Lock()
+	defer i.mux.Unlock()
+	l, exists := i.keys[key]
+
+	if !exists {
+		i.keys[key] = &rateLimiterTimestamp{
+			count:     1,
+			timestamp: time.Now(),
+		}
+		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	for l.count >= i.max {
+		return fmt.Errorf("rate limit exceeded for %s", key)
+	}
+
+	l.count++
+	return nil
+}
+
+func userIP(r *http.Request) string {
+	a := r.Header.Get("X-Forwarded-For")
+	if a == "" {
+		a = r.RemoteAddr
+	}
+	return strings.Split(a, ",")[0]
 }

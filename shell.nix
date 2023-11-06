@@ -20,6 +20,7 @@ pkgs.mkShell {
     pkgs.treefmt
     pkgs.act
     pkgs.apacheHttpd
+    pkgs.mkpasswd
   ];
   hardeningDisable = [ "all" ]; # to build the cross-compiler
   buildInputs = [
