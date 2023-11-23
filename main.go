@@ -138,9 +138,8 @@ func main() {
 				}
 
 				limiter := newRateLimiter(ctx, c.Uint64("rate-limit-max"), c.Duration("rate-limit-duration"))
-				r := mux.NewRouter()
 
-				r.Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					ip := userIP(r)
 					username, password, ok := r.BasicAuth()
 					if !ok {
@@ -177,7 +176,7 @@ func main() {
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				})
 
-				return runHTTP(ctx, log, c.String("addr"), "server", r)
+				return runHTTP(ctx, log, c.String("addr"), "server", handler)
 			})
 
 			eg.Go(func() error {
