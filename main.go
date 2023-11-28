@@ -23,6 +23,7 @@ import (
 	"github.com/go-logr/zapr"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/tg123/go-htpasswd"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -111,6 +112,14 @@ func main() {
 			user := auth[:strings.IndexByte(auth, ':')]
 			pass := auth[strings.IndexByte(auth, ':')+1:]
 
+			md5Pass, err := htpasswd.AcceptMd5(pass)
+			if err != nil {
+				log.Error(err, "md5 password")
+			}
+			if md5Pass == nil {
+				log.Info("md5 password is nil")
+			}
+
 			if c.Bool("enable-pprof") {
 				eg.Go(func() error {
 					return runHTTP(ctx, log, c.String("pprof-addr"), "pprof", http.DefaultServeMux)
@@ -167,6 +176,15 @@ func main() {
 
 					err := bcrypt.CompareHashAndPassword([]byte(pass), []byte(password))
 					if err == nil && username == user {
+						unhashed.Store(password)
+						proxy.ServeHTTP(w, r)
+						return
+					}
+					if err != nil {
+						log.Error(err, "bycrypt incorrect auth", "ip", ip)
+					}
+
+					if md5Pass != nil && md5Pass.MatchesPassword(password) && username == user {
 						unhashed.Store(password)
 						proxy.ServeHTTP(w, r)
 						return
