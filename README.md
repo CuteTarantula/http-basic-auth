@@ -1,6 +1,6 @@
 # Introduction
 
-**http-basic-auth** is designed to run as a sidecar container that will secure a service with basic authentication. Because of the way it works it reduces latency and resources required to secure a service. It is not meant to fully replace nginx ingress or other ingress controllers but to be used in conjunction with them.
+**http-basic-auth** is designed to run as a sidecar container that will secure a service with basic authentication. Because of the way it works it reduces latency and resources required to secure a service.
 
 ## Supported Hashing Algorithms
 
