@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.21-alpine as builder
+FROM golang:1.23-alpine as builder
 WORKDIR /build
 ADD . .
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./... && CGO_ENABLED=0 go build -o ./bin/http-basic-auth ./main.go

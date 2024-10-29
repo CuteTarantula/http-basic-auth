@@ -25,3 +25,4 @@ go.work
 .envrc.local
 .vscode
 __debug*
+.direnv
