@@ -1,6 +1,6 @@
 # Introduction
 
-**http-basic-auth** is designed to run as a sidecar container that will secure a service with basic authentication. Because of the way it works it reduces latency and resources required to secure a service.
+**http-basic-auth** is designed to run as a sidecar container that will secure a service with basic authentication. Because of the way it works it reduces latency and resources required to secure a service. This solution is useful for service-to-service communication between two different clusters, for example.
 
 ## Supported Hashing Algorithms
 
